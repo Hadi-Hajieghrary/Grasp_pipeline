@@ -30,7 +30,7 @@ def generate_grasp_poses(point_cloud, name_object):
         point_cloud_pcd = np.vstack((point_cloud_pcd, line))
 
     np.savetxt('objects/' + 'pcd_' + name_object + '.pcd', point_cloud_pcd, fmt='%s')
-    detector = gpd.GraspDetector("grasp_pose_detector/eigen_params.cfg")
+    detector = gpd.GraspDetector("GPD_parameters/eigen_params.cfg")
     pcd = o3d.io.read_point_cloud('objects/' + 'pcd_' + name_object + '.pcd')
     os.remove('objects/' + 'pcd_' + name_object + '.pcd')
 
