@@ -44,7 +44,7 @@ sigma_RICP = 0.5
 
 ## PROGRAMS
 
-def get_zed_datas():
+def get_zed_data():
 
     # Create a ZED camera object
     zed = sl.Camera()
@@ -351,7 +351,7 @@ def viz_mayavi(points):
 def main(): 
 
     # Extraction of the depth map matrix and the colored image matrix from the ZED2 camera
-    image_rgb, point_cloud = get_zed_datas()
+    image_rgb, point_cloud = get_zed_data()
 
     # Initialize Detectron2
     predictor, cfg = initialize_detectron2()
