@@ -10,3 +10,10 @@ cd build
 cmake .. -DBUILD_PYTHON=ON
 make -j
 ```
+<a name="Install AprilTag"></a>
+## 1) Install AprilTag
+```
+git clone https://github.com/Tinker-Twins/AprilTag.git
+cd ~/AprilTag
+./install.sh
+```
