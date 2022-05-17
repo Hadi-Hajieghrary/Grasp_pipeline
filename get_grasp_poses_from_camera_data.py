@@ -23,10 +23,15 @@ setup_logger()
 import open3d as o3d
 from rospy.numpy_msg import numpy_msg
 from rospy_tutorials.msg import Floats
+from argparse import ArgumentParser
+sys.path.append('/home/tristan/AprilTag/scripts')
+import apriltag
+from datetime import datetime ##
+
 
 ## PARAMETERS
 
-objects_list = ['Bottle', 'Box']
+objects_list = ['Bottle', 'Box', 'Milk_carton_Valio_1.5L']
 
 # Detectron2 image segmentation
 threshold_detectron2 = 0.2    # Set the minimum score to display an object detected by Detectron2
@@ -34,17 +39,20 @@ model_detectron2 = "COCO-PanopticSegmentation/panoptic_fpn_R_50_1x.yaml"    # Th
 
 # Outlier points removal
 nb_neighbors = 5 # Which specifies how many neighbors are taken into account in order to calculate the average distance for a given point
-std_ratio = 0.01 # Which allows setting the threshold level based on the standard deviation of the average distances across the point cloud. The lower this number the more aggressive the filter will be
+std_ratio = 0.005 # Which allows setting the threshold level based on the standard deviation of the average distances across the point cloud. The lower this number the more aggressive the filter will be
 
 # Pose estimation
-voxel_size = 0.01  # Used for the global registration in meter
-threshold_RICP = 0.5
-sigma_RICP = 0.5
+voxel_size_first_step = 0.01 # 0.01 # Used for the global registration in meter
+# voxel_size_second_step = 0.01
+threshold_RICP_first_step = 0.5 ##0.5
+sigma_RICP_first_step = 0.5 # 0.5
+# threshold_RICP_second_step = 0.2 ##0.5
+# sigma_RICP_second_step = 0.8
 
 
 ## PROGRAMS
 
-def get_zed_data():
+def get_zed_datas():
 
     # Create a ZED camera object
     zed = sl.Camera()
@@ -90,7 +98,6 @@ def get_zed_data():
         image_rgb = convertRGBAToRGB(image_rgba)    # Detectron2 needs to have an image in the RGB format as input
 
     zed.close()
-
     return image_rgb, point_cloud
 
 
@@ -126,22 +133,45 @@ def initialize_detectron2():
     return predictor, cfg
 
 
-def choose_object_to_grasp(predictor, image_rgb, cfg):
+def choose_object_to_grasp(predictor, image_rgb, cfg, predefined_object):
 
         outputs = predictor(image_rgb)
         v = Visualizer(image_rgb[:, :, ::-1], MetadataCatalog.get(cfg.DATASETS.TRAIN[0]), scale=1.2)
         out = v.draw_instance_predictions(outputs["instances"].to("cpu"))
-        cv2.imshow('rectangled image',out.get_image()[:, :, ::-1]) # Display the MAsks and class for the detected objects
-        print("\nDetected objects:")
-        i = 1
-        for data in outputs["instances"].pred_classes:
-            num = data.item()
-            print(i," - ", MetadataCatalog.get(cfg.DATASETS.TRAIN[0]).thing_classes[num])
-            i += 1
-        print("Which object do you want to grasp?")
+        j = 0
+        if(predefined_object == 'NULL'):
+            cv2.imshow('rectangled image',out.get_image()[:, :, ::-1]) # Display the Masks and class for the detected objects
+            print("\nDetected objects:")
+            i = 1
+            for data in outputs["instances"].pred_classes:
+                num = data.item()
+                print(i," - ", MetadataCatalog.get(cfg.DATASETS.TRAIN[0]).thing_classes[num])
+                i += 1
+            print("Which object do you want to grasp?")
 
-        object_number = input()
-        object_number = int(object_number)-1
+            object_number = input()
+            object_number = int(object_number)-1
+
+        elif((predefined_object == 'Bottle') | (predefined_object == 'Milk_carton_Valio_1.5L')):
+            condition_stop = True
+            for data in outputs["instances"].pred_classes:
+                num = data.item()
+                condition = (MetadataCatalog.get(cfg.DATASETS.TRAIN[0]).thing_classes[num] == 'bottle')
+                if(condition & condition_stop):
+                    object_number = j
+                    condition_stop = False
+                j = j+1
+        
+        elif(predefined_object == 'Box'):
+            condition_stop = True
+            for data in outputs["instances"].pred_classes:
+                num = data.item()
+                condition = (MetadataCatalog.get(cfg.DATASETS.TRAIN[0]).thing_classes[num] == 'truck')
+                if(condition & condition_stop):
+                    object_number = j
+                    condition_stop = False
+                j = j+1
+        
         return object_number, outputs
 
 
@@ -194,31 +224,51 @@ def pose_estimation(vector_point_cloud_object, object_to_grasp):
     point_cloud_object_exact = np.loadtxt(file_name)
 
     # Global registration
-    source = o3d.geometry.PointCloud()
-    target = o3d.geometry.PointCloud()
-    source.points = o3d.utility.Vector3dVector(vector_point_cloud_object)
-    target.points = o3d.utility.Vector3dVector(point_cloud_object_exact)
+    source = o3d.geometry.PointCloud() ## Inversé
+    target = o3d.geometry.PointCloud() ##
+    target.points = o3d.utility.Vector3dVector(vector_point_cloud_object)
+    source.points = o3d.utility.Vector3dVector(point_cloud_object_exact)
 
-    source, target, source_down, target_down, source_fpfh, target_fpfh = prepare_dataset(voxel_size, source, target)
-    
-    result_ransac = execute_global_registration(source_down, target_down, source_fpfh, target_fpfh, voxel_size)
-    #print("RESULT_RANSAC", result_ransac)
-    #print(result_ransac.transformation)
+    trans_init = np.asarray([[0.0, 0.0, 1.0, 0.0], [1.0, 0.0, 0.0, 0.0],
+                             [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]])
+    source, target, source_down, target_down, source_fpfh, target_fpfh = prepare_dataset(voxel_size_first_step, source, target, trans_init)
+    result_ransac_1 = execute_global_registration(source_down, target_down, source_fpfh, target_fpfh, voxel_size_first_step)
+
+    # draw_registration_result(source_down, target_down, np.asarray(result_ransac_1.transformation))
+
+    # source, target, source_down, target_down, source_fpfh, target_fpfh = prepare_dataset(voxel_size_second_step, source, target, result_ransac_1.transformation)
+    # result_ransac_2 = execute_global_registration(source_down, target_down, source_fpfh, target_fpfh, voxel_size_second_step)
+
+    # draw_registration_result(source_down, target_down, np.asarray(result_ransac_2.transformation))
+
+    # print("RESULT_RANSAC", result_ransac)
+    # print(result_ransac.transformation)
     
     # Robust ICP
     source.estimate_normals()
     target.estimate_normals()
-    loss = o3d.pipelines.registration.TukeyLoss(k=sigma_RICP)
+    loss = o3d.pipelines.registration.TukeyLoss(k=sigma_RICP_first_step)
     p2l = o3d.pipelines.registration.TransformationEstimationPointToPlane(loss)
-    reg_p2l = o3d.pipelines.registration.registration_icp(source, target, threshold_RICP, result_ransac.transformation, p2l)
+    reg_p2l = o3d.pipelines.registration.registration_icp(source, target, threshold_RICP_first_step, result_ransac_1.transformation, p2l)
+
+    # draw_registration_result(source, target, reg_p2l_1.transformation)
+
+    # loss = o3d.pipelines.registration.TukeyLoss(k=sigma_RICP_second_step)
+    # p2l = o3d.pipelines.registration.TransformationEstimationPointToPlane(loss)
+    # reg_p2l = o3d.pipelines.registration.registration_icp(source, target, threshold_RICP_second_step, reg_p2l_1.transformation, p2l)
+
     #print(reg_p2l)
-    #print("Spatial transformation matrix of the object: ")
-    #print(reg_p2l.transformation)    # Print the transformation matrix of the object
+    # print("Spatial transformation matrix of the object: ")
+    # print(reg_p2l.transformation)    # Print the transformation matrix of the object
 
-    #draw_registration_result(source_down, target_down, np.asarray(result_ransac.transformation))
-    draw_registration_result(source, target, reg_p2l.transformation)
+    draw_registration_result(source, target, reg_p2l.transformation) ########################################################
 
-    return reg_p2l.transformation
+    first_row = reg_p2l.transformation[0][:]
+    second_row = -reg_p2l.transformation[1][:]
+    third_row = -reg_p2l.transformation[2][:]
+    spatial_transformation_matrix = np.matrix([first_row, second_row, third_row])
+
+    return spatial_transformation_matrix
 
 
 def draw_registration_result(source, target, transformation):
@@ -245,7 +295,10 @@ def preprocess_point_cloud(pcd, voxel_size):
     return pcd_down, pcd_fpfh
 
 
-def prepare_dataset(voxel_size, source, target):
+def prepare_dataset(voxel_size, source, target, trans_init):
+
+    # trans_init = np.asarray([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0],
+    #                          [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]])
 
     trans_init = np.asarray([[0.0, 0.0, 1.0, 0.0], [1.0, 0.0, 0.0, 0.0],
                              [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]])
@@ -350,14 +403,22 @@ def viz_mayavi(points):
 
 def main(): 
 
+    predefined_object = 'Bottle' # Set to 'NULL' to work without automation ########################################""
+
+    t1 = datetime.now() ##
     # Extraction of the depth map matrix and the colored image matrix from the ZED2 camera
-    image_rgb, point_cloud = get_zed_data()
+    image_rgb, point_cloud = get_zed_datas()
+    t2 = datetime.now() ##
+    print("\n\nTime to open the camera and retrieve the data :", t2-t1,"\n\n") ##
 
     # Initialize Detectron2
     predictor, cfg = initialize_detectron2()
 
     # Choose the object in the scene for whom the grasp poses will be generated
-    object_number, outputs = choose_object_to_grasp(predictor, image_rgb, cfg)
+    object_number, outputs = choose_object_to_grasp(predictor, image_rgb, cfg, predefined_object)
+
+    t3 = datetime.now() ##
+    print("\n\nTime for Detectron2 :", t3-t2,"\n\n") ##
 
     # Merge the mask of the object and the depth map matrix to obtain the partial point cloud of the object
     vector_point_cloud_object = get_point_cloud_object(object_number, outputs, point_cloud)
@@ -366,21 +427,32 @@ def main():
     # viz_mayavi(vector_point_cloud_object) # Display the point cloud of the object
 
     # Remove the outlier points
-    print("Number of point before removing outlier points:",vector_point_cloud_object.shape[0])
+    print("Number of point before removing outlier points:",vector_point_cloud_object.shape[0]) ##
     vector_point_cloud_object = remove_outlier_points(vector_point_cloud_object)
-    print("Number of point after removing outlier points:",vector_point_cloud_object.shape[0])
+    print("Number of point after removing outlier points:",vector_point_cloud_object.shape[0]) ##
 
-    for obj in range(len(objects_list)):
-        print(obj+1, '-', objects_list[obj])
-    object_to_grasp = int(input())-1
+    if(predefined_object == 'NULL'):
+        for obj in range(len(objects_list)):
+            print(obj+1, '-', objects_list[obj])
+        object_to_grasp = int(input())-1
 
-    #viz_mayavi(vector_point_cloud_object)
+    else:
+        for obj in range(len(objects_list)):
+            if(predefined_object == objects_list[obj]):
+                object_to_grasp = obj
+                break
+
+    t4 = datetime.now() ##
+    print("\n\nTime for outlier removal and pose detection :", t4-t3,"\n\n") ##
+    # viz_mayavi(vector_point_cloud_object)
 
     # Pose estimation
 
     spatial_transformation_matrix = pose_estimation(vector_point_cloud_object, object_to_grasp)
 
     vector_grasps_to_publish = generate_grasps_poses(spatial_transformation_matrix, object_to_grasp)
+
+    print(spatial_transformation_matrix)
 
     print("X_object =", spatial_transformation_matrix[0, 3])
     print("Y_object =", spatial_transformation_matrix[1, 3])
@@ -390,12 +462,19 @@ def main():
     print("Z_first_grasp =", vector_grasps_to_publish[11+13])
     vector_grasps_to_publish = np.array(vector_grasps_to_publish, dtype=np.float32)
 
-    # Publish topic
+    t5 = datetime.now() ##
+    print("\n\nTime for pose detection and change frame :", t5-t4,"\n\n") ##
+    print("\n\nTime total :", t5-t1,"\n\n") ##
+
+    # Publish grasp poses topic
     pub = rospy.Publisher('grasps_poses_camera_coordinate', numpy_msg(Floats), queue_size=10)
     rospy.init_node('publisher_node', anonymous=True)
+
     rate = rospy.Rate(1)
     rospy.loginfo("Publisher node started, now publishing")
+
     while not rospy.is_shutdown():
+        # pub.publish(vector_apriltag_to_publish)
         pub.publish(vector_grasps_to_publish)
         rate.sleep()
 
