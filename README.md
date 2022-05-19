@@ -1,5 +1,6 @@
 # Grasp_pipeline
 <a name="Install the GPD python binding"></a>
+This pipeline requires a GPU to be run.
 ## 1) Install the GPD python binding
 ```
 git clone https://github.com/patricknaughton01/gpd  
