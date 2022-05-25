@@ -21,8 +21,9 @@ setup_logger() ##
 import open3d as o3d
 from argparse import ArgumentParser
 from datetime import datetime ##
+# import roslib; roslib.load_manifest('visualization_marker_tutorials')
 from visualization_msgs.msg import Marker
-from visualization_msgs.msg import MarkerArray
+#from visualization_msgs.msg import MarkerArray
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge, CvBridgeError
 from sensor_msgs.msg import PointCloud2
@@ -31,16 +32,6 @@ import sensor_msgs.point_cloud2 as pc2
 ## PARAMETERS
 
 objects_list = ['Bottle', 'Box', 'Milk_carton_Valio_1.5L', 'Milk_carton_Coop_1.5L']
-predefined_object = 'NULL' # Set to 'NULL' to work without automation 
-path_from_catkin_ws = 'src/pipeline/scripts/'
-
-finger_length = 0.1
-finger_width = 0.02
-finger_height = 0.05
-base_width = 0.02
-base_height = 0.05
-
-display_object = True
 
 # Detectron2 image segmentation
 threshold_detectron2 = 0.2    # Set the minimum score to display an object detected by Detectron2
@@ -51,11 +42,12 @@ nb_neighbors = 5 # Which specifies how many neighbors are taken into account in 
 std_ratio = 0.005 # Which allows setting the threshold level based on the standard deviation of the average distances across the point cloud. The lower this number the more aggressive the filter will be
 
 # Pose estimation
-local_registration = 'Point_to_point_ICP' # 'Robust_ICP' or 'Point_to_plane_ICP' or 'Point_to_point_ICP'
 voxel_size_first_step = 0.01 # 0.01 # Used for the global registration in meter
+# voxel_size_second_step = 0.01
 threshold_RICP_first_step = 0.5 ##0.5
 sigma_RICP_first_step = 0.01 # 0.5
-
+# threshold_RICP_second_step = 0.2 ##0.5
+# sigma_RICP_second_step = 0.8
 
 
 ## PROGRAMS
@@ -90,6 +82,28 @@ def listener_image():
     return image_rgb, point_cloud_matrix
 
 
+def convertRGBAToRGB( rgba, background=(255,255,255) ):
+    row, col, ch = rgba.shape
+
+    if ch == 3:
+        return rgba
+
+    assert ch == 4, 'RGBA image has 4 channels.'
+
+    rgb = np.zeros( (row, col, 3), dtype='float32' )
+    r, g, b, a = rgba[:,:,0], rgba[:,:,1], rgba[:,:,2], rgba[:,:,3]
+
+    a = np.asarray( a, dtype='float32' ) / 255.0
+
+    R, G, B = background
+
+    rgb[:,:,0] = r * a + (1.0 - a) * R
+    rgb[:,:,1] = g * a + (1.0 - a) * G
+    rgb[:,:,2] = b * a + (1.0 - a) * B
+
+    return np.asarray( rgb, dtype='uint8' )
+
+
 def initialize_detectron2():
 
     cfg = get_cfg()
@@ -97,7 +111,6 @@ def initialize_detectron2():
     cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = threshold_detectron2
     cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url(model_detectron2)
     predictor = DefaultPredictor(cfg)
-
     return predictor, cfg
 
 
@@ -107,8 +120,6 @@ def choose_object_to_grasp(predictor, image_rgb, cfg, predefined_object):
         v = Visualizer(image_rgb[:, :, ::-1], MetadataCatalog.get(cfg.DATASETS.TRAIN[0]), scale=1.2)
         out = v.draw_instance_predictions(outputs["instances"].to("cpu"))
         j = 0
-        object_number = -1
-
         if(predefined_object == 'NULL'):
             cv2.imshow('rectangled image',out.get_image()[:, :, ::-1]) # Display the Masks and class for the detected objects
             print("\nDetected objects:")
@@ -141,9 +152,6 @@ def choose_object_to_grasp(predictor, image_rgb, cfg, predefined_object):
                     object_number = j
                     condition_stop = False
                 j = j+1
-        
-        if(object_number == -1):
-            print("\n\nThe desired object is not detected\n\n")
         
         return object_number, outputs
 
@@ -193,19 +201,12 @@ def remove_outlier_points(vector_point_cloud_object):
 
 def pose_estimation(vector_point_cloud_object, object_to_grasp):
 
-    try:
-        file_name = path_from_catkin_ws + 'objects/point_cloud_' + str(objects_list[object_to_grasp]) + '.txt'
-        point_cloud_object_exact = np.loadtxt(file_name)
-    except:
-        try:
-            file_name = 'objects/point_cloud_' + str(objects_list[object_to_grasp]) + '.txt'
-            point_cloud_object_exact = np.loadtxt(file_name)
-        except:
-            print("\n\nIssue with the path to the folder \"objects\"")
+    file_name = 'objects/point_cloud_' + str(objects_list[object_to_grasp]) + '.txt'
+    point_cloud_object_exact = np.loadtxt(file_name)
 
     # Global registration
-    source = o3d.geometry.PointCloud()
-    target = o3d.geometry.PointCloud()
+    source = o3d.geometry.PointCloud() ## Inversé
+    target = o3d.geometry.PointCloud() ##
     target.points = o3d.utility.Vector3dVector(vector_point_cloud_object)
     source.points = o3d.utility.Vector3dVector(point_cloud_object_exact)
 
@@ -213,6 +214,17 @@ def pose_estimation(vector_point_cloud_object, object_to_grasp):
                              [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]])
     source, target, source_down, target_down, source_fpfh, target_fpfh = prepare_dataset(voxel_size_first_step, source, target, trans_init)
     result_ransac_1 = execute_global_registration(source_down, target_down, source_fpfh, target_fpfh, voxel_size_first_step)
+
+    # draw_registration_result(source_down, target_down, np.asarray(result_ransac_1.transformation))
+
+    # source, target, source_down, target_down, source_fpfh, target_fpfh = prepare_dataset(voxel_size_second_step, source, target, result_ransac_1.transformation)
+    # result_ransac_2 = execute_global_registration(source_down, target_down, source_fpfh, target_fpfh, voxel_size_second_step)
+
+    # draw_registration_result(source_down, target_down, np.asarray(result_ransac_2.transformation))
+
+    # print("RESULT_RANSAC", result_ransac)
+    # print(result_ransac.transformation)
+    local_registration = 'Point_to_point_ICP'
 
     # Robust ICP
     if(local_registration == 'Robust_ICP'):
@@ -234,24 +246,31 @@ def pose_estimation(vector_point_cloud_object, object_to_grasp):
         reg_p2l = o3d.pipelines.registration.registration_icp(
         source, target, threshold_RICP_first_step, result_ransac_1.transformation,
         o3d.pipelines.registration.TransformationEstimationPointToPoint())
+    """
+    source.estimate_normals()
+    target.estimate_normals()
+    loss = o3d.pipelines.registration.TukeyLoss(k=sigma_RICP_first_step)
+    p2l = o3d.pipelines.registration.TransformationEstimationPointToPlane(loss)
+    reg_p2l = o3d.pipelines.registration.registration_icp(source, target, threshold_RICP_first_step, reg_p2l.transformation, p2l)
+    """
 
+    # loss = o3d.pipelines.registration.TukeyLoss(k=sigma_RICP_second_step)
+    # p2l = o3d.pipelines.registration.TransformationEstimationPointToPlane(loss)
+    # reg_p2l = o3d.pipelines.registration.registration_icp(source, target, threshold_RICP_second_step, reg_p2l_1.transformation, p2l)
+
+    #print(reg_p2l)
+    # print("Spatial transformation matrix of the object: ")
+    # print(reg_p2l.transformation)    # Print the transformation matrix of the object
+    # draw_registration_result(source_down, target_down, result_ransac_1.transformation)
     draw_registration_result(source, target, reg_p2l.transformation) ########################################################
 
-    first_row = np.array(reg_p2l.transformation[0][:])
-    second_row = np.array(reg_p2l.transformation[1][:])
-    third_row = np.array(reg_p2l.transformation[2][:])
-
-    teta = mt.pi/2 ## teta needs maybe to set to -pi/2
-    M = np.array([[first_row[:3]], [second_row[:3]], [third_row[:3]]]) ##
-    R = np.array([[mt.cos(teta), 0, mt.sin(teta)], [0, 1, 0], [-mt.sin(teta), 0, mt.cos(teta)]]) ##
-    M = np.dot(M,R) ##
-
-    first_row[:3] = M[0][:]
-    second_row[:3] = M[1][:]
-    third_row[:3] = M[2][:]
-
+    
+    first_row = reg_p2l.transformation[0][:]
+    second_row = reg_p2l.transformation[1][:]
+    third_row = reg_p2l.transformation[2][:]
     spatial_transformation_matrix = np.matrix([first_row, second_row, third_row])
     
+
     return spatial_transformation_matrix
 
 
@@ -310,15 +329,8 @@ def execute_global_registration(source_down, target_down, source_fpfh, target_fp
 
 def generate_grasps_poses(spatial_transformation_matrix, object_to_grasp):
 
-    try:
-        grasp_file_name = path_from_catkin_ws + 'objects/grasps_' + str(objects_list[object_to_grasp]) + '.txt'
-        grasps_object_objref = np.loadtxt(grasp_file_name)
-    except:
-        try:
-            grasp_file_name = 'objects/grasps_' + str(objects_list[object_to_grasp]) + '.txt'
-            grasps_object_objref = np.loadtxt(grasp_file_name)
-        except:
-            print("\n\nIssue with the path to the folder \"grasps\"")
+    grasp_file_name = 'objects/grasps_' + str(objects_list[object_to_grasp]) + '.txt'
+    grasps_object_objref = np.loadtxt(grasp_file_name)
 
     vector_grasps_to_publish = np.zeros(grasps_object_objref.shape[0]*14+13)
     vector_grasps_to_publish[0] = object_to_grasp
@@ -333,12 +345,7 @@ def generate_grasps_poses(spatial_transformation_matrix, object_to_grasp):
         mat_obj_objref = np.vstack(new_line)
         new_line = (mat_obj_objref, [grasps_object_objref[i // 14, 9], grasps_object_objref[i // 14, 10], grasps_object_objref[i // 14, 11]])
         mat_obj_objref = np.vstack(new_line)
-
-        mat = spatial_transformation_matrix[:3, :3]*mat_obj_objref ##
-
-        pose_object = np.array([spatial_transformation_matrix[0, 3], spatial_transformation_matrix[1, 3], spatial_transformation_matrix[2, 3]])
-        pose_grasp_in_regard_to_object = np.array([grasps_object_objref[i // 14][0], grasps_object_objref[i // 14][1], grasps_object_objref[i // 14][2]])
-        pose_grasp_in_camera_coordinate = pose_object + np.dot(spatial_transformation_matrix[:3, :3], pose_grasp_in_regard_to_object)
+        mat = spatial_transformation_matrix[:3, :3]*mat_obj_objref
 
         if (i % 14 == 0):
             vector_grasps_to_publish[i+13] = mat[0, 0]
@@ -347,7 +354,7 @@ def generate_grasps_poses(spatial_transformation_matrix, object_to_grasp):
         if (i % 14 == 2):
             vector_grasps_to_publish[i+13] = mat[0, 2]
         if (i % 14 == 3):
-            vector_grasps_to_publish[i+13] = pose_grasp_in_camera_coordinate[0, 0]
+            vector_grasps_to_publish[i+13] = grasps_object_objref[i // 14, 0] + spatial_transformation_matrix[0, 3]
         if (i % 14 == 4):
             vector_grasps_to_publish[i+13] = mat[1, 0]
         if (i % 14 == 5):
@@ -355,7 +362,7 @@ def generate_grasps_poses(spatial_transformation_matrix, object_to_grasp):
         if (i % 14 == 6):
             vector_grasps_to_publish[i+13] = mat[1, 2]
         if (i % 14 == 7):
-            vector_grasps_to_publish[i+13] = pose_grasp_in_camera_coordinate[0, 1]
+            vector_grasps_to_publish[i+13] = grasps_object_objref[i // 14, 1] + spatial_transformation_matrix[1, 3]
         if (i % 14 == 8):
             vector_grasps_to_publish[i+13] = mat[2, 0]
         if (i % 14 == 9):
@@ -363,150 +370,13 @@ def generate_grasps_poses(spatial_transformation_matrix, object_to_grasp):
         if (i % 14 == 10):
             vector_grasps_to_publish[i+13] = mat[2, 2]
         if (i % 14 == 11):
-            vector_grasps_to_publish[i+13] = pose_grasp_in_camera_coordinate[0, 2]
+            vector_grasps_to_publish[i+13] = grasps_object_objref[i // 14, 2] + spatial_transformation_matrix[2, 3]
         if (i % 14 == 12):
             vector_grasps_to_publish[i+13] = grasps_object_objref[i // 14, 12]
         if (i % 14 == 13):
             vector_grasps_to_publish[i+13] = grasps_object_objref[i // 14, 13]
 
     return vector_grasps_to_publish
-
-
-def generate_marker(vector_grasps_to_publish, grasp_indice, markerArray):
-
-    #print(vector_grasps_to_publish[13+14*grasp_indice:13+14*grasp_indice+12])
-
-    r11 = vector_grasps_to_publish[13+14*grasp_indice+0]
-    r12 = vector_grasps_to_publish[13+14*grasp_indice+1]
-    r13 = vector_grasps_to_publish[13+14*grasp_indice+2]
-    r21 = vector_grasps_to_publish[13+14*grasp_indice+4]
-    r22 = vector_grasps_to_publish[13+14*grasp_indice+5]
-    r23 = vector_grasps_to_publish[13+14*grasp_indice+6]
-    r31 = vector_grasps_to_publish[13+14*grasp_indice+8]
-    r32 = vector_grasps_to_publish[13+14*grasp_indice+9]
-    r33 = vector_grasps_to_publish[13+14*grasp_indice+10]
-
-    qw = mt.sqrt(1+r11+r22+r33)*0.5
-    qx = 1/4/qw*(r32-r23)
-    qy = 1/4/qw*(r13-r31)
-    qz = 1/4/qw*(r21-r12)
-
-    x_grasp_pose = vector_grasps_to_publish[13+14*grasp_indice+3]
-    y_grasp_pose = vector_grasps_to_publish[13+14*grasp_indice+7]
-    z_grasp_pose = vector_grasps_to_publish[13+14*grasp_indice+11]
-
-    width_grasp = vector_grasps_to_publish[13+14*grasp_indice+12]
-    
-    base_marker = Marker()
-    left_finger_marker = Marker()
-    right_finger_marker = Marker()
-
-    base_marker.header.frame_id = "zed2_left_camera_frame"
-    left_finger_marker.header.frame_id = "zed2_left_camera_frame"
-    right_finger_marker.header.frame_id = "zed2_left_camera_frame"
-
-    base_marker.header.stamp = rospy.Time.now()
-    left_finger_marker.header.stamp = rospy.Time.now()
-    right_finger_marker.header.stamp = rospy.Time.now()
-
-    rotation_matrix = np.array([[r11, r12, r13], [r21, r22, r23], [r31, r32, r33]])
-
-    ## Base marker
-    
-    # set shape, Arrow: 0; Cube: 1 ; Sphere: 2 ; Cylinder: 3
-    base_marker.type = 1
-    base_marker.id = grasp_indice*3
-    base_marker.ns = "hand_base"
-    
-    # Set the scale of the marker
-    base_marker.scale.x = base_width
-    base_marker.scale.y = width_grasp+2*finger_width
-    base_marker.scale.z = base_height
-    
-    # Set the color
-    base_marker.color.r = 0.0
-    base_marker.color.g = 1.0
-    base_marker.color.b = 1.0
-    base_marker.color.a = 1.0
-    
-    # Set the pose of the marker
-    base_marker.pose.position.x = x_grasp_pose
-    base_marker.pose.position.y = y_grasp_pose
-    base_marker.pose.position.z = z_grasp_pose
-    base_marker.pose.orientation.x = qx
-    base_marker.pose.orientation.y = qy
-    base_marker.pose.orientation.z = qz
-    base_marker.pose.orientation.w = qw
-
-    ## Left finger
-
-    # set shape, Arrow: 0; Cube: 1 ; Sphere: 2 ; Cylinder: 3
-    left_finger_marker.type = 1
-    left_finger_marker.id = grasp_indice*3+1
-    left_finger_marker.ns = "left_finger"
-    
-    # Set the scale of the marker
-    left_finger_marker.scale.x = finger_length
-    left_finger_marker.scale.y = finger_width
-    left_finger_marker.scale.z = finger_height
-
-    # Set the color
-    left_finger_marker.color.r = 0.0
-    left_finger_marker.color.g = 1.0
-    left_finger_marker.color.b = 0.0
-    left_finger_marker.color.a = 1.0
-    
-    # Set the pose of the marker
-    offset_x = [base_width/2+finger_length/2]
-    offset_y = [width_grasp/2+finger_width/2]
-    array_marker = np.array([[x_grasp_pose], [y_grasp_pose], [z_grasp_pose]])+np.dot(rotation_matrix, np.array([offset_x, offset_y, [0]]))
-
-    left_finger_marker.pose.position.x = array_marker[0]
-    left_finger_marker.pose.position.y = array_marker[1]
-    left_finger_marker.pose.position.z = array_marker[2]
-    left_finger_marker.pose.orientation.x = qx
-    left_finger_marker.pose.orientation.y = qy
-    left_finger_marker.pose.orientation.z = qz
-    left_finger_marker.pose.orientation.w = qw
-
-    ## Right finger
-
-    # set shape, Arrow: 0; Cube: 1 ; Sphere: 2 ; Cylinder: 3
-    right_finger_marker.type = 1
-    right_finger_marker.id = grasp_indice*3+2
-    right_finger_marker.ns = "right_finger"
-    
-    # Set the scale of the marker
-    right_finger_marker.scale.x = finger_length
-    right_finger_marker.scale.y = finger_width
-    right_finger_marker.scale.z = finger_height
-
-    # Set the color
-    right_finger_marker.color.r = 0.0
-    right_finger_marker.color.g = 1.0
-    right_finger_marker.color.b = 0.0
-    right_finger_marker.color.a = 1.0
-    
-    # Set the pose of the marker
-    offset_x = [base_width/2+finger_length/2]
-    offset_y = [-width_grasp/2-finger_width/2]
-    array_marker = np.array([[x_grasp_pose], [y_grasp_pose], [z_grasp_pose]])+np.dot(rotation_matrix, np.array([offset_x, offset_y, [0]]))
-
-    right_finger_marker.pose.position.x = array_marker[0]
-    right_finger_marker.pose.position.y = array_marker[1]
-    right_finger_marker.pose.position.z = array_marker[2]
-    right_finger_marker.pose.orientation.x = qx
-    right_finger_marker.pose.orientation.y = qy
-    right_finger_marker.pose.orientation.z = qz
-    right_finger_marker.pose.orientation.w = qw
-
-    ## Marker array
-    markerArray.markers.append(base_marker)
-    markerArray.markers.append(left_finger_marker)
-    markerArray.markers.append(right_finger_marker)
-
-
-    return markerArray
 
 
 def viz_mayavi(points):
@@ -535,9 +405,10 @@ def viz_mayavi(points):
 
 def main(): 
 
+    predefined_object = 'Bottle' # Set to 'NULL' to work without automation ########################################""
+
     t1 = datetime.now() ##
     # Extraction of the depth map matrix and the colored image matrix from the ZED2 camera
-    
     image_rgb, point_cloud = get_zed_datas()
     t2 = datetime.now() ##
     print("\n\nTime to open the camera and retrieve the data :", t2-t1,"\n\n") ##
@@ -558,9 +429,9 @@ def main():
     # viz_mayavi(vector_point_cloud_object) # Display the point cloud of the object
 
     # Remove the outlier points
-    # print("Number of point before removing outlier points:",vector_point_cloud_object.shape[0]) ##
+    print("Number of point before removing outlier points:",vector_point_cloud_object.shape[0]) ##
     vector_point_cloud_object = remove_outlier_points(vector_point_cloud_object)
-    # print("Number of point after removing outlier points:",vector_point_cloud_object.shape[0]) ##
+    print("Number of point after removing outlier points:",vector_point_cloud_object.shape[0]) ##
 
     if(predefined_object == 'NULL'):
         for obj in range(len(objects_list)):
@@ -578,82 +449,146 @@ def main():
     # viz_mayavi(vector_point_cloud_object)
 
     # Pose estimation
+
     spatial_transformation_matrix = pose_estimation(vector_point_cloud_object, object_to_grasp)
 
-    vector_grasp_to_publish = generate_grasps_poses(spatial_transformation_matrix, object_to_grasp)
+    vector_grasps_to_publish = generate_grasps_poses(spatial_transformation_matrix, object_to_grasp)
+    
+    """
+    #rospy.init_node('register', anonymous = True)
+    topic = 'grasps_poses_camera_coordinate'
 
-    markerArray = MarkerArray()
+    publisher = rospy.Publisher(topic, Marker, queue_size=10)
 
-    grasp_indice = 0
-    markerArray = generate_marker(vector_grasp_to_publish, grasp_indice, markerArray)
-    grasp_indice = 1
-    markerArray = generate_marker(vector_grasp_to_publish, grasp_indice, markerArray)
-    grasp_indice = 2
-    markerArray = generate_marker(vector_grasp_to_publish, grasp_indice, markerArray)
-    grasp_indice = 3
+    #publisher = rospy.Publisher(topic, MarkerArray, queue_size=10)
+    
+    while publisher.get_num_connections() == 0: pass
+    #markerArray = MarkerArray()
+    """
+    
+    """
+    print(spatial_transformation_matrix)
 
-    if(display_object == True):
-        r11 = vector_grasp_to_publish[1]
-        r12 = vector_grasp_to_publish[2]
-        r13 = vector_grasp_to_publish[3]
-        r21 = vector_grasp_to_publish[5]
-        r22 = vector_grasp_to_publish[6]
-        r23 = vector_grasp_to_publish[7]
-        r31 = vector_grasp_to_publish[9]
-        r32 = vector_grasp_to_publish[10]
-        r33 = vector_grasp_to_publish[11]
+    print("X_object =", spatial_transformation_matrix[0, 3])
+    print("Y_object =", spatial_transformation_matrix[1, 3])
+    print("Z_object =", spatial_transformation_matrix[2, 3])
+    print("X_first_grasp =", vector_grasps_to_publish[3+13])
+    print("Y_first_grasp =", vector_grasps_to_publish[7+13])
+    print("Z_first_grasp =", vector_grasps_to_publish[11+13])
+    """
 
-        qw = mt.sqrt(1+r11+r22+r33)*0.5
-        qx = 1/4/qw*(r32-r23)
-        qy = 1/4/qw*(r13-r31)
-        qz = 1/4/qw*(r21-r12)
+    print("X_object =", spatial_transformation_matrix[0, 3])
+    print("Y_object =", spatial_transformation_matrix[1, 3])
+    print("Z_object =", spatial_transformation_matrix[2, 3])
 
-        x_object = vector_grasp_to_publish[4]
-        y_object = vector_grasp_to_publish[8]
-        z_object = vector_grasp_to_publish[12]
-
-        object = Marker()
-        object.header.frame_id = "zed2_left_camera_frame"
-        object.header.stamp = rospy.Time.now()
-
-        # set shape, Arrow: 0; Cube: 1 ; Sphere: 2 ; Cylinder: 3
-        object.type = 3
-        object.id = (grasp_indice+1)*3+1
-        object.ns = "object"
-
-        # Set the scale of the marker
-        object.scale.x = 0.035
-        object.scale.y = 0.035
-        object.scale.z = 0.22
-
-        # Set the color
-        object.color.r = 0.0
-        object.color.g = 1.0
-        object.color.b = 1.0
-        object.color.a = 1.0
-
-        # Set the pose of the marker
-        object.pose.position.x = x_object
-        object.pose.position.y = y_object
-        object.pose.position.z = z_object
-        object.pose.orientation.x = qx
-        object.pose.orientation.y = qy
-        object.pose.orientation.z = qz
-        object.pose.orientation.w = qw
-        markerArray.markers.append(object)
-
-    # vector_grasps_to_publish = np.array(vector_grasps_to_publish, dtype=np.float32)
+    vector_grasps_to_publish = np.array(vector_grasps_to_publish, dtype=np.float32)
 
     t5 = datetime.now() ##
     print("\n\nTime for pose detection and change frame :", t5-t4,"\n\n") ##
     print("\n\nTime total :", t5-t1,"\n\n") ##
 
-    marker_pub = rospy.Publisher("/grasp_pose", MarkerArray, queue_size = 2)
+    r11 = vector_grasps_to_publish[13]
+    r12 = vector_grasps_to_publish[13+1]
+    r13 = vector_grasps_to_publish[13+2]
+    r21 = vector_grasps_to_publish[13+4]
+    r22 = vector_grasps_to_publish[13+5]
+    r23 = vector_grasps_to_publish[13+6]
+    r31 = vector_grasps_to_publish[13+8]
+    r32 = vector_grasps_to_publish[13+9]
+    r33 = vector_grasps_to_publish[13+10]
+
+    q0 = mt.sqrt(1+r11+r22+r33)*0.5
+    q1 = 1/4/q0*(r32-r23)
+    q2 = 1/4/q0*(r13-r31)
+    q3 = 1/4/q0*(r21-r12)
+
+    marker_pub = rospy.Publisher("/grasp_pose", Marker, queue_size = 2)
+    
+    marker = Marker()
+    
+    marker.header.frame_id = "base_link"
+    marker.header.stamp = rospy.Time.now()
+    
+    # set shape, Arrow: 0; Cube: 1 ; Sphere: 2 ; Cylinder: 3
+    marker.type = 1
+    marker.id = 0
+    marker.ns = "finger"
+    
+    # Set the scale of the marker
+    marker.scale.x = vector_grasps_to_publish[25]
+    marker.scale.y = 0.1
+    marker.scale.z = 0.05
+    
+    # Set the color
+    marker.color.r = 0.0
+    marker.color.g = 1.0
+    marker.color.b = 0.0
+    marker.color.a = 1.0
+    
+    # Set the pose of the marker
+    marker.pose.position.x = vector_grasps_to_publish[16]
+    marker.pose.position.y = vector_grasps_to_publish[20]
+    marker.pose.position.z = vector_grasps_to_publish[24]
+    marker.pose.orientation.x = q0
+    marker.pose.orientation.y = q1
+    marker.pose.orientation.z = q2
+    marker.pose.orientation.w = q3
     
     while not rospy.is_shutdown():
-        marker_pub.publish(markerArray)
+        marker_pub.publish(marker)
         rospy.rostime.wallsleep(1.0)
 
+    """
+    # Publish grasp poses topic
+    pub = rospy.Publisher('grasps_poses_camera_coordinate', numpy_msg(Floats), queue_size=10)
+    rospy.init_node('publisher_node', anonymous=True)
+
+    rate = rospy.Rate(1)
+    rospy.loginfo("Publisher node started, now publishing")
+    """
+
+    """
+    while not rospy.is_shutdown():
+
+        marker = Marker()
+        marker.header.frame_id = "zed2_left_camera_frame"
+        #marker.header.frame_id = "map"
+        marker.ns = "finger"
+        #marker.id = id
+        marker.id = 1
+        marker.header.stamp = rospy.Time.now()
+        marker.type = marker.CUBE
+        #marker.type.
+        marker.action = marker.ADD
+        marker.pose.position.x = vector_grasps_to_publish[16]
+        marker.pose.position.y = vector_grasps_to_publish[20]
+        marker.pose.position.z = vector_grasps_to_publish[24]
+        marker.lifetime = rospy.Duration(1000)
+        marker.pose.orientation.x = q0
+        marker.pose.orientation.y = q1
+        marker.pose.orientation.z = q2
+        marker.pose.orientation.w = q3
+
+        marker.scale.x = 0.5 # forward direction
+        marker.scale.y = 0.5 # hand closing direction
+        marker.scale.z = 0.5 # hand vertical direction
+
+        marker.color.a = 1.0
+        marker.color.r = 1.0
+        marker.color.g = 1.0
+        marker.color.b = 1.0
+        print(marker)
+
+        publisher.publish(markerArray)
+
+        rospy.sleep(1)
+        
+        rospy.spin()
+
+        # pub.publish(vector_apriltag_to_publish)
+        # pub.publish(vector_grasps_to_publish)
+        # rate.sleep()
+    """
 
 if __name__ == '__main__':
     try:
