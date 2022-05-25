@@ -99,13 +99,13 @@ def compute_robot_pose(result, point_cloud):
         upper_left_3d = point_cloud[int(upper_left[1])][int(upper_left[0])]
         upper_right_3d = point_cloud[int(upper_right[1])][int(upper_right[0])]
 
-        dX_x = bottom_right_3d[0] - upper_right_3d[0]
-        dY_x = bottom_right_3d[1] - upper_right_3d[1]
-        dZ_x = bottom_right_3d[2] - upper_right_3d[2]
+        dX_x = upper_right_3d[0] - upper_left_3d[0]
+        dY_x = upper_right_3d[1] - upper_left_3d[1]
+        dZ_x = upper_right_3d[2] - upper_left_3d[2]
 
-        dX_y = upper_right_3d[0] - upper_left_3d[0]
-        dY_y = upper_right_3d[1] - upper_left_3d[1]
-        dZ_y = upper_right_3d[2] - upper_left_3d[2]
+        dX_y = upper_right_3d[0] - bottom_right_3d[0]
+        dY_y = upper_right_3d[1] - bottom_right_3d[1]
+        dZ_y = upper_right_3d[2] - bottom_right_3d[2]
 
         measured_width = mt.sqrt(dX_x**2+dY_x**2+dZ_x**2)
         measured_length = mt.sqrt(dX_y**2+dY_y**2+dZ_y**2)
@@ -122,81 +122,55 @@ def compute_robot_pose(result, point_cloud):
         r32 = r13*r21 - r11*r23
         r33 = r11*r22 - r12*r21
 
-        qw = mt.sqrt(1+r11+r22+r33)*0.5
-        qx = 1/4/qw*(r32-r23)
-        qy = 1/4/qw*(r13-r31)
-        qz = 1/4/qw*(r21-r12)
-        
-        qw_ = qw
-        qx_ = qx
-        qy_ = qy
-        qz_ = qz
-        upper_right_3d[0], upper_right_3d[1], upper_right_3d[2]
-        robot_pose_in_camera_frame_ = [upper_right_3d[0], upper_right_3d[1], upper_right_3d[2], qw_, qx_, qy_, qz_]
+        teta_x = -mt.pi/2
+        M = np.array([[r11, r12, r13], [r21, r22, r23], [r31, r32, r33]]) 
+        Rx = np.array([[1, 0, 0], [0, mt.cos(teta_x), -mt.sin(teta_x)], [0, mt.sin(teta_x), mt.cos(teta_x)]])
+        M = np.dot(Rx, M) ##
 
-        """
-        teta = mt.pi/2
+        r11, r12, r13 = M[0][0], M[0][1], M[0][2]
+        r21, r22, r23 = M[1][0], M[1][1], M[1][2]
+        r31, r32, r33 = M[2][0], M[2][1], M[2][2]
 
-        Q = [qw, qx, qy, qz]
-        Q1 = [mt.cos(teta/2), mt.sin(teta/2), 0, 0]
-        # Q1 = [mt.cos(teta/2), mt.sin(teta/2), mt.sin(teta/2), 0]
-        Q2 = Q
-        Q1_prod_Q2_first = Q1[0]*Q2[0]-Q1[1]*Q2[1]-Q1[2]*Q2[2]-Q1[3]*Q2[3]
-        Q1_prod_Q2_second = Q1[0]*Q2[1]+Q1[1]*Q2[0]+Q1[2]*Q2[3]-Q1[3]*Q2[2]
-        Q1_prod_Q2_third = Q1[0]*Q2[2]-Q1[1]*Q2[3]+Q1[2]*Q2[0]+Q1[3]*Q2[1]
-        Q1_prod_Q2_fourth = Q1[0]*Q2[3]+Q1[1]*Q2[2]-Q1[2]*Q2[1]+Q1[3]*Q2[1]
-        Q1 = [Q1_prod_Q2_first, Q1_prod_Q2_second, Q1_prod_Q2_third, Q1_prod_Q2_fourth]
-        Q2 = [mt.cos(teta/2), mt.sin(teta/2), 0, 0]
-        # Q2 = [mt.cos(teta/2), mt.sin(teta/2), mt.sin(teta/2), 0]
-        Q1_prod_Q2_first = Q1[0]*Q2[0]-Q1[1]*Q2[1]-Q1[2]*Q2[2]-Q1[3]*Q2[3]
-        Q1_prod_Q2_second = Q1[0]*Q2[1]+Q1[1]*Q2[0]+Q1[2]*Q2[3]-Q1[3]*Q2[2]
-        Q1_prod_Q2_third = Q1[0]*Q2[2]-Q1[1]*Q2[3]+Q1[2]*Q2[0]+Q1[3]*Q2[1]
-        Q1_prod_Q2_fourth = Q1[0]*Q2[3]+Q1[1]*Q2[2]-Q1[2]*Q2[1]+Q1[3]*Q2[1]
-        qw = Q1_prod_Q2_first
-        qx = Q1_prod_Q2_second
-        qy = Q1_prod_Q2_third
-        qz = Q1_prod_Q2_fourth
-        """
-        robot_pose_in_camera_frame__ = [upper_right_3d[0], upper_right_3d[1], upper_right_3d[2], qw_, qx_, qy_, qz_]
+        try:
+            qw = mt.sqrt(1+r11+r22+r33)*0.5
+            qx = 1/4/qw*(r32-r23)
+            qy = 1/4/qw*(r13-r31)
+            qz = 1/4/qw*(r21-r12)
+           
+            quat = [qx, qy, qz, qw]
+            quat_norm = quat / np.linalg.norm(quat)
+            qx = quat_norm[0]
+            qy = quat_norm[1]
+            qz = quat_norm[2]
+            qw = quat_norm[3]
+    
+            offset_x = width_apriltag-length_robot/2
+            offset_y = width_robot/2-width_apriltag
+            offset = np.array([offset_y, offset_x, 0])
+            M2 = np.dot(M, offset)
+            center_point = upper_right_3d+np.array([M2[1], M2[2], M2[0]])
+            robot_pose_in_camera_frame = [center_point[0], center_point[1], center_point[2], qw, qx, qy, qz] #### Regarder labo ordre (qz, qx, qy, qz)
+        except:
+            robot_pose_in_camera_frame = 'NULL'
 
-        print(qw*qw+qx*qx+qy*qy+qz*qz)
-
-        quat = [qx, qy, qz, qw]
-        quat_norm = quat / np.linalg.norm(quat)
-        qx = quat_norm[0]
-        qy = quat_norm[1]
-        qz = quat_norm[2]
-        qw = quat_norm[3]
-
-        r11 = qw*qw+qx*qx-qy*qy-qz*qz
-        r12 = 2*qx*qy-2*qw*qz
-        r13 = 2*qx*qz+2*qw*qy
-        r21 = 2*qx*qy+2*qw*qz
-        r22 = qw*qw-qx*qx+qy*qy-qz*qz
-        r23 = 2*qy*qz-2*qw*qx
-        r31 = 2*qx*qz-2*qw*qy
-        r32 = 2*qy*qz+2*qw*qx
-        r33 = qw*qw-qx*qx-qy*qy+qz*qz
-
-        rotation_matrix = np.array([[r11, r12, r13], [r21, r22, r23], [r31, r32, r33]])
-
-        offset_x = [width_apriltag-length_robot/2]
-        offset_y = [width_robot/2-width_apriltag]
-        center_point = np.array([[upper_right_3d[0]], [upper_right_3d[1]], [upper_right_3d[2]]])+np.dot(rotation_matrix, np.array([offset_x, offset_y, [0]]))
-
-        robot_pose_in_camera_frame = [center_point[0], center_point[1], center_point[2], qx, qy, qz, qw] #### Regarder labo ordre (qz, qx, qy, qz)
-
-    return robot_pose_in_camera_frame__
+    return robot_pose_in_camera_frame
 
 
 def get_pose():
 
     robot_pose_in_camera_frame = 'NULL'
 
+    i = 0
+
     while(robot_pose_in_camera_frame == 'NULL'):
         image_rgb, point_cloud = get_zed_datas()
         result = apriltag_image(image_rgb)
         robot_pose_in_camera_frame = compute_robot_pose(result, point_cloud)
+
+        i += 1
+        if (i > 20):
+            print("\n\nApril tag didn't see for a while")
+            i = 0
 
     return robot_pose_in_camera_frame
 
@@ -216,7 +190,7 @@ def main():
                          "robot_base", 
                          "zed2_left_camera_frame")
 
-        # print("Publish")
+        print("Publish")
         rate.sleep()
 
 
