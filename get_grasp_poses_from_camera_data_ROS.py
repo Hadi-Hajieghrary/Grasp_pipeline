@@ -27,6 +27,7 @@ from sensor_msgs.msg import Image
 from cv_bridge import CvBridge, CvBridgeError
 from sensor_msgs.msg import PointCloud2
 import sensor_msgs.point_cloud2 as pc2
+import tf
 
 ## PARAMETERS
 
@@ -39,22 +40,23 @@ finger_width = 0.02
 finger_height = 0.05
 base_width = 0.02
 base_height = 0.05
+length_approach = 0.1
 
-display_object = True
+display_object = False
 
 # Detectron2 image segmentation
 threshold_detectron2 = 0.2    # Set the minimum score to display an object detected by Detectron2
 model_detectron2 = "COCO-PanopticSegmentation/panoptic_fpn_R_50_1x.yaml"    # This is the choosed model used by Detectron2. The other models can be found here: https://github.com/facebookresearch/detectron2/blob/main/MODEL_ZOO.md
 
 # Outlier points removal
-nb_neighbors = 5 # Which specifies how many neighbors are taken into account in order to calculate the average distance for a given point
+nb_neighbors = 3 # 5# Which specifies how many neighbors are taken into account in order to calculate the average distance for a given point
 std_ratio = 0.005 # Which allows setting the threshold level based on the standard deviation of the average distances across the point cloud. The lower this number the more aggressive the filter will be
 
 # Pose estimation
 local_registration = 'Point_to_point_ICP' # 'Robust_ICP' or 'Point_to_plane_ICP' or 'Point_to_point_ICP'
-voxel_size_first_step = 0.01 # 0.01 # Used for the global registration in meter
+voxel_size_first_step = 0.0001 # 0.01 # Used for the global registration in meter
 threshold_RICP_first_step = 0.5 ##0.5
-sigma_RICP_first_step = 0.01 # 0.5
+sigma_RICP_first_step = 0.5 # 0.5
 
 
 
@@ -103,6 +105,7 @@ def initialize_detectron2():
 
 def choose_object_to_grasp(predictor, image_rgb, cfg, predefined_object):
 
+        #image_rgb = image_rgb.astype('uint8')
         outputs = predictor(image_rgb)
         v = Visualizer(image_rgb[:, :, ::-1], MetadataCatalog.get(cfg.DATASETS.TRAIN[0]), scale=1.2)
         out = v.draw_instance_predictions(outputs["instances"].to("cpu"))
@@ -110,7 +113,6 @@ def choose_object_to_grasp(predictor, image_rgb, cfg, predefined_object):
         object_number = -1
 
         if(predefined_object == 'NULL'):
-            cv2.imshow('rectangled image',out.get_image()[:, :, ::-1]) # Display the Masks and class for the detected objects
             print("\nDetected objects:")
             i = 1
             for data in outputs["instances"].pred_classes:
@@ -119,8 +121,14 @@ def choose_object_to_grasp(predictor, image_rgb, cfg, predefined_object):
                 i += 1
             print("Which object do you want to grasp?")
 
+            cv2.imshow('rectangled image',out.get_image()[:, :, ::-1]) # Display the Masks and class for the detected objects
+            cv2.waitKey(300)
+            #cv2.displayAllWindows()
+
             object_number = input()
             object_number = int(object_number)-1
+
+            #cv2.destroyAllWindows('rectangled image')
 
         elif((predefined_object == 'Bottle') | (predefined_object == 'Milk_carton_Valio_1.5L') | (predefined_object == 'Milk_carton_Coop_1.5L')):
             condition_stop = True
@@ -209,10 +217,120 @@ def pose_estimation(vector_point_cloud_object, object_to_grasp):
     target.points = o3d.utility.Vector3dVector(vector_point_cloud_object)
     source.points = o3d.utility.Vector3dVector(point_cloud_object_exact)
 
+    ################
+    threshold_list = [0.05, 0.001, 0.005, 0.001]
+
+    voxel_sizes = o3d.utility.DoubleVector([0.1, 0.05, 0.025, 0.01, 0.005])
+
+    # List of Convergence-Criteria for Multi-Scale ICP:
+    criteria_list = [
+        o3d.pipelines.registration.RANSACConvergenceCriteria(10000, 0.5),
+        o3d.pipelines.registration.RANSACConvergenceCriteria(10000, 0.5),
+        o3d.pipelines.registration.RANSACConvergenceCriteria(10000, 0.05),
+        o3d.pipelines.registration.RANSACConvergenceCriteria(10000, 0.005),
+        o3d.pipelines.registration.RANSACConvergenceCriteria(10000, 0.005)
+    ]
+
+    # `max_correspondence_distances` for Multi-Scale ICP (o3d.utility.DoubleVector):
+    max_correspondence_distances = o3d.utility.DoubleVector([0.3, 0.2, 0.07, 0.05, 0.04])
+
+    # Save iteration wise `fitness`, `inlier_rmse`, etc. to analyse and tune result.
     trans_init = np.asarray([[0.0, 0.0, 1.0, 0.0], [1.0, 0.0, 0.0, 0.0],
                              [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]])
+    
+    i = 0
+    source, target, source_down, target_down, source_fpfh, target_fpfh = prepare_dataset(voxel_sizes[i], source, target, trans_init)
+    result1 = o3d.pipelines.registration.registration_ransac_based_on_feature_matching(
+        source_down, target_down, source_fpfh, target_fpfh, False,
+        max_correspondence_distances[i],
+        o3d.pipelines.registration.TransformationEstimationPointToPoint(False),
+        3, [
+            o3d.pipelines.registration.CorrespondenceCheckerBasedOnEdgeLength(
+                0.9),
+            o3d.pipelines.registration.CorrespondenceCheckerBasedOnDistance(
+                max_correspondence_distances[i] * 1.5)
+        ], criteria_list[i])
+
+    i = 1
+    source, target, source_down, target_down, source_fpfh, target_fpfh = prepare_dataset(voxel_sizes[i], source, target, trans_init)
+    result2 = o3d.pipelines.registration.registration_ransac_based_on_feature_matching(
+        source_down, target_down, source_fpfh, target_fpfh, False,
+        max_correspondence_distances[i],
+        o3d.pipelines.registration.TransformationEstimationPointToPoint(False),
+        3, [
+            o3d.pipelines.registration.CorrespondenceCheckerBasedOnEdgeLength(
+                0.9),
+            o3d.pipelines.registration.CorrespondenceCheckerBasedOnDistance(
+                max_correspondence_distances[i] * 1.5)
+        ], criteria_list[i])
+
+    i = 2
+    source, target, source_down, target_down, source_fpfh, target_fpfh = prepare_dataset(voxel_sizes[i], source, target, trans_init)
+    result3 = o3d.pipelines.registration.registration_ransac_based_on_feature_matching(
+        source_down, target_down, source_fpfh, target_fpfh, False,
+        max_correspondence_distances[i],
+        o3d.pipelines.registration.TransformationEstimationPointToPoint(False),
+        3, [
+            o3d.pipelines.registration.CorrespondenceCheckerBasedOnEdgeLength(
+                0.9),
+            o3d.pipelines.registration.CorrespondenceCheckerBasedOnDistance(
+                max_correspondence_distances[i] * 1.5)
+        ], criteria_list[i])
+
+    i = 3
+    source, target, source_down, target_down, source_fpfh, target_fpfh = prepare_dataset(voxel_sizes[i], source, target, trans_init)
+    result4 = o3d.pipelines.registration.registration_ransac_based_on_feature_matching(
+        source_down, target_down, source_fpfh, target_fpfh, False,
+        max_correspondence_distances[i],
+        o3d.pipelines.registration.TransformationEstimationPointToPoint(False),
+        3, [
+            o3d.pipelines.registration.CorrespondenceCheckerBasedOnEdgeLength(
+                0.9),
+            o3d.pipelines.registration.CorrespondenceCheckerBasedOnDistance(
+                max_correspondence_distances[i] * 1.5)
+        ], criteria_list[i])
+
+    list_rmse = [result1.inlier_rmse, result2.inlier_rmse, result3.inlier_rmse, result4.inlier_rmse]
+    list_result = [result1, result2, result3, result4]
+    min_index = list_rmse.index(min(list_rmse))
+    result = list_result[min_index]
+    #draw_registration_result(source, target, result.transformation)
+    #print(min(list_rmse))
+    #print(min_index)
+    #print(list_rmse)
+
+    
+    """
+    i = 0
+    source.estimate_normals()
+    target.estimate_normals()
+    reg_p2l = o3d.pipelines.registration.registration_icp(
+    source, target, threshold_list[i], result.transformation,
+    o3d.pipelines.registration.TransformationEstimationPointToPlane(),
+    o3d.pipelines.registration.ICPConvergenceCriteria(0.00000001, 0.00000001, 100000))
+    
+    draw_registration_result(source, target, reg_p2l.transformation)
+    print(reg_p2l.inlier_rmse)
+
+    i = 1
+    reg_p2l = o3d.pipelines.registration.registration_icp(
+    source, target, threshold_list[i], result.transformation,
+    o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+    o3d.pipelines.registration.ICPConvergenceCriteria(0.0000001, 0.0000001, 10000))
+
+
+    draw_registration_result(source, target, reg_p2l.transformation)
+    print(reg_p2l.inlier_rmse)
+
+    print(result.inlier_rmse)
+    """
+    ##################
+
+    """
     source, target, source_down, target_down, source_fpfh, target_fpfh = prepare_dataset(voxel_size_first_step, source, target, trans_init)
     result_ransac_1 = execute_global_registration(source_down, target_down, source_fpfh, target_fpfh, voxel_size_first_step)
+    draw_registration_result(source_down, target_down, result_ransac_1.transformation)
+    """
 
     # Robust ICP
     if(local_registration == 'Robust_ICP'):
@@ -220,20 +338,49 @@ def pose_estimation(vector_point_cloud_object, object_to_grasp):
         target_down.estimate_normals()
         loss = o3d.pipelines.registration.TukeyLoss(k=sigma_RICP_first_step)
         p2l = o3d.pipelines.registration.TransformationEstimationPointToPlane(loss)
-        reg_p2l = o3d.pipelines.registration.registration_icp(source_down, target_down, threshold_RICP_first_step, result_ransac_1.transformation, p2l)
+        reg_p2l = o3d.pipelines.registration.registration_icp(source_down, target_down, threshold_RICP_first_step, result_ransac_1.transformation, p2l,
+        o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=200000))
 
     if(local_registration == 'Point_to_plane_ICP'):
         print("Apply point-to-plane ICP")
         source.estimate_normals()
         target.estimate_normals()
-        reg_p2l = o3d.pipelines.registration.registration_icp(source, target, threshold_RICP_first_step, result_ransac_1.transformation,
+        reg_p2l = o3d.pipelines.registration.registration_icp(source, target, threshold_RICP_first_step, result.transformation,
         o3d.pipelines.registration.TransformationEstimationPointToPlane())
     
     if(local_registration == 'Point_to_point_ICP'):
         print("Apply point-to-point ICP")
         reg_p2l = o3d.pipelines.registration.registration_icp(
-        source, target, threshold_RICP_first_step, result_ransac_1.transformation,
-        o3d.pipelines.registration.TransformationEstimationPointToPoint())
+        source, target, threshold_RICP_first_step, result.transformation,
+        o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+        o3d.pipelines.registration.ICPConvergenceCriteria(0.00000000001, 0.00000000001, 100000))
+        reg_p2l = o3d.pipelines.registration.registration_icp(
+        source, target, threshold_RICP_first_step/2, reg_p2l.transformation,
+        o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+        o3d.pipelines.registration.ICPConvergenceCriteria(0.00000000001, 0.00000000001, 100000))
+        reg_p2l = o3d.pipelines.registration.registration_icp(
+        source, target, threshold_RICP_first_step/4, reg_p2l.transformation,
+        o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+        o3d.pipelines.registration.ICPConvergenceCriteria(0.00000000001, 0.00000000001, 100000))
+        reg_p2l = o3d.pipelines.registration.registration_icp(
+        source, target, threshold_RICP_first_step/8, reg_p2l.transformation,
+        o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+        o3d.pipelines.registration.ICPConvergenceCriteria(0.00000000001, 0.00000000001, 100000))
+        reg_p2l = o3d.pipelines.registration.registration_icp(
+        source, target, threshold_RICP_first_step/16, reg_p2l.transformation,
+        o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+        o3d.pipelines.registration.ICPConvergenceCriteria(0.00000000001, 0.00000000001, 100000))
+        reg_p2l = o3d.pipelines.registration.registration_icp(
+        source, target, threshold_RICP_first_step/32, reg_p2l.transformation,
+        o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+        o3d.pipelines.registration.ICPConvergenceCriteria(0.00000000001, 0.00000000001, 100000))
+        print(reg_p2l.fitness)
+        print(reg_p2l.inlier_rmse)
+    
+    if(local_registration == 'Point_to_point_ICP2'):
+        voxel_size = 0.05  # means 5cm for this dataset
+        source, target, source_down, target_down, source_fpfh, target_fpfh = prepare_dataset(voxel_size)
+        draw_registration_result(source, target, reg_p2l.transformation)
 
     draw_registration_result(source, target, reg_p2l.transformation) ########################################################
 
@@ -253,6 +400,11 @@ def pose_estimation(vector_point_cloud_object, object_to_grasp):
     spatial_transformation_matrix = np.matrix([first_row, second_row, third_row])
     
     return spatial_transformation_matrix
+
+##########
+
+
+##########
 
 
 def draw_registration_result(source, target, transformation):
@@ -304,7 +456,7 @@ def execute_global_registration(source_down, target_down, source_fpfh, target_fp
                 0.9),
             o3d.pipelines.registration.CorrespondenceCheckerBasedOnDistance(
                 distance_threshold)
-        ], o3d.pipelines.registration.RANSACConvergenceCriteria(100000, 0.999))
+        ], o3d.pipelines.registration.RANSACConvergenceCriteria(1000000, 0.8))
     return result
 
 
@@ -400,14 +552,17 @@ def generate_marker(vector_grasps_to_publish, grasp_indice, markerArray):
     base_marker = Marker()
     left_finger_marker = Marker()
     right_finger_marker = Marker()
+    approach_marker = Marker()
 
     base_marker.header.frame_id = "zed2_left_camera_frame"
     left_finger_marker.header.frame_id = "zed2_left_camera_frame"
     right_finger_marker.header.frame_id = "zed2_left_camera_frame"
+    approach_marker.header.frame_id = "zed2_left_camera_frame"
 
     base_marker.header.stamp = rospy.Time.now()
     left_finger_marker.header.stamp = rospy.Time.now()
     right_finger_marker.header.stamp = rospy.Time.now()
+    approach_marker.header.stamp = rospy.Time.now()
 
     rotation_matrix = np.array([[r11, r12, r13], [r21, r22, r23], [r31, r32, r33]])
 
@@ -415,7 +570,7 @@ def generate_marker(vector_grasps_to_publish, grasp_indice, markerArray):
     
     # set shape, Arrow: 0; Cube: 1 ; Sphere: 2 ; Cylinder: 3
     base_marker.type = 1
-    base_marker.id = grasp_indice*3
+    base_marker.id = grasp_indice*4+2
     base_marker.ns = "hand_base"
     
     # Set the scale of the marker
@@ -437,12 +592,43 @@ def generate_marker(vector_grasps_to_publish, grasp_indice, markerArray):
     base_marker.pose.orientation.y = qy
     base_marker.pose.orientation.z = qz
     base_marker.pose.orientation.w = qw
-
+    
+    ## Approach marker
+    
+    # set shape, Arrow: 0; Cube: 1 ; Sphere: 2 ; Cylinder: 3
+    approach_marker.type = 1
+    approach_marker.id = grasp_indice*4+3
+    approach_marker.ns = "approach"
+    
+    # Set the scale of the marker
+    approach_marker.scale.x = length_approach
+    approach_marker.scale.y = base_height
+    approach_marker.scale.z = base_height
+    
+    # Set the color
+    approach_marker.color.r = 0.0
+    approach_marker.color.g = 1.0
+    approach_marker.color.b = 1.0
+    approach_marker.color.a = 1.0
+    
+    offset_x = [-base_width/2-length_approach/2]
+    offset_y = [0]
+    array_marker = np.array([[x_grasp_pose], [y_grasp_pose], [z_grasp_pose]])+np.dot(rotation_matrix, np.array([offset_x, offset_y, [0]]))
+    
+    # Set the pose of the marker
+    approach_marker.pose.position.x = array_marker[0]
+    approach_marker.pose.position.y = array_marker[1]
+    approach_marker.pose.position.z = array_marker[2]
+    approach_marker.pose.orientation.x = qx
+    approach_marker.pose.orientation.y = qy
+    approach_marker.pose.orientation.z = qz
+    approach_marker.pose.orientation.w = qw
+    
     ## Left finger
 
     # set shape, Arrow: 0; Cube: 1 ; Sphere: 2 ; Cylinder: 3
     left_finger_marker.type = 1
-    left_finger_marker.id = grasp_indice*3+1
+    left_finger_marker.id = grasp_indice*4
     left_finger_marker.ns = "left_finger"
     
     # Set the scale of the marker
@@ -473,7 +659,7 @@ def generate_marker(vector_grasps_to_publish, grasp_indice, markerArray):
 
     # set shape, Arrow: 0; Cube: 1 ; Sphere: 2 ; Cylinder: 3
     right_finger_marker.type = 1
-    right_finger_marker.id = grasp_indice*3+2
+    right_finger_marker.id = grasp_indice*4+1
     right_finger_marker.ns = "right_finger"
     
     # Set the scale of the marker
@@ -501,12 +687,40 @@ def generate_marker(vector_grasps_to_publish, grasp_indice, markerArray):
     right_finger_marker.pose.orientation.w = qw
 
     ## Marker array
-    markerArray.markers.append(base_marker)
     markerArray.markers.append(left_finger_marker)
     markerArray.markers.append(right_finger_marker)
-
+    markerArray.markers.append(base_marker)
+    markerArray.markers.append(approach_marker)
 
     return markerArray
+
+
+def choose_grasp_pose(vector_grasps_to_publish):
+    listener = tf.TransformListener()
+
+    trans = False
+
+    while (not rospy.is_shutdown()) and (trans == False):
+        try:
+            (trans,rot) = listener.lookupTransform("zed2_left_camera_frame", 'tool0_controller', rospy.Time(0))
+        except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
+            continue
+    
+    number_of_grasps = int((len(vector_grasps_to_publish)-13)/14)
+    dist = np.zeros(number_of_grasps)
+    for i in range(number_of_grasps):
+        ind_x = 13+14*i+3
+        x = vector_grasps_to_publish[ind_x]
+        ind_y = 13+14*i+7
+        y = vector_grasps_to_publish[ind_y]
+        ind_z = 13+14*i+11
+        z = vector_grasps_to_publish[ind_z]
+        dist_i = mt.sqrt((trans[0]-x)**2+(trans[1]-y)**2+(trans[2]-z)**2)
+        dist[i] = dist_i
+
+    index_closer_grasp = np.argmin(dist)
+    vector_grasps_to_publish[13:13+14] = vector_grasps_to_publish[13+14*index_closer_grasp:13+14*(index_closer_grasp+1)]
+    return vector_grasps_to_publish
 
 
 def viz_mayavi(points):
@@ -554,7 +768,7 @@ def main():
     # Merge the mask of the object and the depth map matrix to obtain the partial point cloud of the object
     vector_point_cloud_object = get_point_cloud_object(object_number, outputs, point_cloud)
     
-    # np.savetxt('point_cloud_box_2.txt', vector_point_cloud_object, fmt='%s') # This line can be used to store the point cloud in a file
+    np.savetxt('point_cloud_box_2.txt', vector_point_cloud_object, fmt='%s') # This line can be used to store the point cloud in a file
     # viz_mayavi(vector_point_cloud_object) # Display the point cloud of the object
 
     # Remove the outlier points
@@ -582,15 +796,19 @@ def main():
 
     vector_grasp_to_publish = generate_grasps_poses(spatial_transformation_matrix, object_to_grasp)
 
-    markerArray = MarkerArray()
+    vector_grasp_to_publish = choose_grasp_pose(vector_grasp_to_publish)
+
+    markerGrasp = MarkerArray()
 
     grasp_indice = 0
-    markerArray = generate_marker(vector_grasp_to_publish, grasp_indice, markerArray)
+    markerGrasp = generate_marker(vector_grasp_to_publish, grasp_indice, markerGrasp)
+    """
     grasp_indice = 1
     markerArray = generate_marker(vector_grasp_to_publish, grasp_indice, markerArray)
     grasp_indice = 2
     markerArray = generate_marker(vector_grasp_to_publish, grasp_indice, markerArray)
     grasp_indice = 3
+    """
 
     if(display_object == True):
         r11 = vector_grasp_to_publish[1]
@@ -618,7 +836,7 @@ def main():
 
         # set shape, Arrow: 0; Cube: 1 ; Sphere: 2 ; Cylinder: 3
         object.type = 3
-        object.id = (grasp_indice+1)*3+1
+        object.id = (grasp_indice+1)*4+1
         object.ns = "object"
 
         # Set the scale of the marker
@@ -640,7 +858,7 @@ def main():
         object.pose.orientation.y = qy
         object.pose.orientation.z = qz
         object.pose.orientation.w = qw
-        markerArray.markers.append(object)
+        markerGrasp.markers.append(object)
 
     # vector_grasps_to_publish = np.array(vector_grasps_to_publish, dtype=np.float32)
 
@@ -648,11 +866,13 @@ def main():
     print("\n\nTime for pose detection and change frame :", t5-t4,"\n\n") ##
     print("\n\nTime total :", t5-t1,"\n\n") ##
 
-    marker_pub = rospy.Publisher("/grasp_pose", MarkerArray, queue_size = 2)
-    
+    # marker_pub = rospy.Publisher("/grasp_pose", MarkerArray, queue_size = 2)
+    marker_pub = rospy.Publisher("/detect_grasps/plot_grasps", MarkerArray, queue_size = 2)
+
     while not rospy.is_shutdown():
-        marker_pub.publish(markerArray)
-        rospy.rostime.wallsleep(1.0)
+        marker_pub.publish(markerGrasp)
+        rospy.sleep(1)
+    rospy.spin()
 
 
 if __name__ == '__main__':
