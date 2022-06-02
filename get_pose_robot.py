@@ -1,11 +1,10 @@
 #!/usr/bin/env python
 
-import pyzed.sl as sl
 import numpy as np
 from argparse import ArgumentParser
 import os
-import cv2
 import sys
+import cv2
 sys.path.append('/home/tristan/AprilTag/scripts')
 import apriltag
 import roslib
@@ -23,8 +22,17 @@ import sensor_msgs.point_cloud2 as pc2
 
 width_robot = 0.37
 length_robot = 0.68
+
+length_to_arm = 0.505
+width_to_arm = 0.1175
+
 width_apriltag = 0.16
+
 publish_rate = 2
+
+center_robot = 'arm_center' # 'base_center', 'arm_center'
+
+angle = 'pi/2' # 'pi/2', '-pi/2'
 
 ## Programs
 
@@ -84,13 +92,147 @@ def compute_robot_pose(result, point_cloud):
 
     number_of_apriltag = len(result)//4
     # print("Number of apriltag detected :", number_of_apriltag)
-
-    if(number_of_apriltag == 0):
-        robot_pose_in_camera_frame = 'NULL'
     
-    if(number_of_apriltag >= 1):
-        bottom_left = result[0][7][1]
-        bottom_right = result[0][7][0]
+    if(number_of_apriltag == 1):
+        ID = result[0][1]
+
+        if(ID == 1):
+            bottom_left = result[0][7][1]
+            bottom_right = result[0][7][0]
+            upper_left = result[0][7][2]
+            upper_right = result[0][7][3]
+
+            bottom_left_3d = point_cloud[int(bottom_left[1])][int(bottom_left[0])]
+            bottom_right_3d = point_cloud[int(bottom_right[1])][int(bottom_right[0])]
+            upper_left_3d = point_cloud[int(upper_left[1])][int(upper_left[0])]
+            upper_right_3d = point_cloud[int(upper_right[1])][int(upper_right[0])]
+
+            dX_x = upper_right_3d[0] - bottom_right_3d[0]
+            dY_x = upper_right_3d[1] - bottom_right_3d[1]
+            dZ_x = upper_right_3d[2] - bottom_right_3d[2]
+
+            dX_y = bottom_left_3d[0] - bottom_right_3d[0]
+            dY_y = bottom_left_3d[1] - bottom_right_3d[1]
+            dZ_y = bottom_left_3d[2] - bottom_right_3d[2]
+
+            measured_width = mt.sqrt(dX_x**2+dY_x**2+dZ_x**2)
+            measured_length = mt.sqrt(dX_y**2+dY_y**2+dZ_y**2)
+
+            """
+            r11 = dX_x/measured_width
+            r12 = dY_x/measured_width
+            r13 = dZ_x/measured_width
+
+            r21 = dX_y/measured_length
+            r22 = dY_y/measured_length
+            r23 = dZ_y/measured_length
+
+            r31 = r12*r23 - r13*r22
+            r32 = r13*r21 - r11*r23
+            r33 = r11*r22 - r12*r21
+
+            z_distance = mt.sqrt(r31**2+r32**2+r33**2)
+            r31 = r31/z_distance
+            r32 = r32/z_distance
+            r33 = r33/z_distance
+            """
+
+            r11 = dX_x/measured_width
+            r12 = dY_x/measured_width
+            r13 = dZ_x/measured_width
+
+            r21 = dX_y/measured_length
+            r22 = dY_y/measured_length
+            r23 = dZ_y/measured_length
+
+            x1 = dX_x/measured_width
+            x2 = dY_x/measured_width
+            x3 = dZ_x/measured_width
+
+            y1 = dX_y/measured_length
+            y2 = dY_y/measured_length
+            y3 = dZ_y/measured_length
+
+            r31 = r12*r23 - r13*r22
+            r32 = r13*r21 - r11*r23
+            r33 = r11*r22 - r12*r21
+
+            z_distance = mt.sqrt(r31**2+r32**2+r33**2)
+            z1 = r31/z_distance
+            z2 = r32/z_distance
+            z3 = r33/z_distance
+
+            if(angle == '-pi/2'):
+                teta_x = -mt.pi/2
+
+            if(angle == 'pi/2'):
+                teta_x = 0
+            
+            r11, r21, r31 = x1, x2, x3
+            r12, r22, r32 = y1, y2, y3
+            r13, r23, r33 = z1, z2, z3
+            M = np.array([[r11, r12, r13], [r21, r22, r23], [r31, r32, r33]])
+
+            Rx = np.array([[1, 0, 0], [0, mt.cos(teta_x), -mt.sin(teta_x)], [0, mt.sin(teta_x), mt.cos(teta_x)]])
+            M = np.dot(Rx, M) ##
+
+            r11, r12, r13 = M[0][0], M[0][1], M[0][2]
+            r21, r22, r23 = M[1][0], M[1][1], M[1][2]
+            r31, r32, r33 = M[2][0], M[2][1], M[2][2]
+
+            try:
+                qw = mt.sqrt(1+r11+r22+r33)*0.5
+                qx = 1/4/qw*(r32-r23)
+                qy = 1/4/qw*(r13-r31)
+                qz = 1/4/qw*(r21-r12)
+                
+                quat = [qx, qy, qz, qw]
+                quat_norm = quat / np.linalg.norm(quat)
+                qx = quat_norm[0]
+                qy = quat_norm[1]
+                qz = quat_norm[2]
+                qw = quat_norm[3]
+
+                if(angle == '-pi/2'):
+
+                    if(center_robot == 'base_center'):
+                        offset_x = 0
+                        offset_y = 0
+                        offset_z = 0.04
+
+                    elif(center_robot == 'arm_center'):
+                        offset_x = 0.0
+                        offset_y = 0.0
+                        offset_z = 0.04
+
+                if(angle == 'pi/2'):
+
+                    if(center_robot == 'arm_center'):
+                        offset_x = 0.11
+                        offset_y = 0.0625
+                        offset_z = 0.04
+
+
+                # offset = np.array([offset_z, offset_x, offset_y])
+                #offset = np.array([offset_x, offset_y, offset_z])
+                offset = np.array([offset_x, offset_y, offset_z])
+                M2 = np.dot(M, offset)
+                # print(M2)
+                # center_point = upper_right_3d+np.array([M2[1], M2[2], M2[0]])# M2[1], M2[2], M2[0]
+                center_point = upper_right_3d+np.array([M2[0], M2[1], M2[2]])
+                robot_pose_in_camera_frame = [center_point[0], center_point[1], center_point[2], qx, qy, qz, qw]
+                # robot_pose_in_camera_frame = [upper_right_3d[0], upper_right_3d[1], upper_right_3d[2], qw, qx, qy, qz]
+
+            except:
+                robot_pose_in_camera_frame = 'NULL'
+        else:
+            print("\n\nAprilTag ID1 is hidden\n\n")
+            robot_pose_in_camera_frame = 'NULL'
+        
+    if(number_of_apriltag == 2):
+        
+        bottom_left = result[4][7][1]
+        bottom_right = result[4][7][0]
         upper_left = result[0][7][2]
         upper_right = result[0][7][3]
 
@@ -99,13 +241,13 @@ def compute_robot_pose(result, point_cloud):
         upper_left_3d = point_cloud[int(upper_left[1])][int(upper_left[0])]
         upper_right_3d = point_cloud[int(upper_right[1])][int(upper_right[0])]
 
-        dX_x = upper_right_3d[0] - upper_left_3d[0]
-        dY_x = upper_right_3d[1] - upper_left_3d[1]
-        dZ_x = upper_right_3d[2] - upper_left_3d[2]
+        dX_x = upper_right_3d[0] - bottom_right_3d[0]
+        dY_x = upper_right_3d[1] - bottom_right_3d[1]
+        dZ_x = upper_right_3d[2] - bottom_right_3d[2]
 
-        dX_y = upper_right_3d[0] - bottom_right_3d[0]
-        dY_y = upper_right_3d[1] - bottom_right_3d[1]
-        dZ_y = upper_right_3d[2] - bottom_right_3d[2]
+        dX_y = bottom_left_3d[0] - bottom_right_3d[0]
+        dY_y = bottom_left_3d[1] - bottom_right_3d[1]
+        dZ_y = bottom_left_3d[2] - bottom_right_3d[2]
 
         measured_width = mt.sqrt(dX_x**2+dY_x**2+dZ_x**2)
         measured_length = mt.sqrt(dX_y**2+dY_y**2+dZ_y**2)
@@ -118,14 +260,36 @@ def compute_robot_pose(result, point_cloud):
         r22 = dY_y/measured_length
         r23 = dZ_y/measured_length
 
+        x1 = dX_x/measured_width
+        x2 = dY_x/measured_width
+        x3 = dZ_x/measured_width
+
+        y1 = dX_y/measured_length
+        y2 = dY_y/measured_length
+        y3 = dZ_y/measured_length
+
         r31 = r12*r23 - r13*r22
         r32 = r13*r21 - r11*r23
         r33 = r11*r22 - r12*r21
 
-        teta_x = -mt.pi/2
+        z_distance = mt.sqrt(r31**2+r32**2+r33**2)
+        z1 = r31/z_distance
+        z2 = r32/z_distance
+        z3 = r33/z_distance
+
+        if(angle == '-pi/2'):
+            teta_x = -mt.pi/2
+
+        if(angle == 'pi/2'):
+            teta_x = mt.pi/2
+
+
+        r11, r21, r31 = x1, x2, x3
+        r12, r22, r32 = y1, y2, y3
+        r13, r23, r33 = z1, z2, z3
         M = np.array([[r11, r12, r13], [r21, r22, r23], [r31, r32, r33]]) 
-        Rx = np.array([[1, 0, 0], [0, mt.cos(teta_x), -mt.sin(teta_x)], [0, mt.sin(teta_x), mt.cos(teta_x)]])
-        M = np.dot(Rx, M) ##
+        #Rx = np.array([[1, 0, 0], [0, mt.cos(teta_x), -mt.sin(teta_x)], [0, mt.sin(teta_x), mt.cos(teta_x)]])
+        #M = np.dot(Rx, M) ##
 
         r11, r12, r13 = M[0][0], M[0][1], M[0][2]
         r21, r22, r23 = M[1][0], M[1][1], M[1][2]
@@ -136,22 +300,41 @@ def compute_robot_pose(result, point_cloud):
             qx = 1/4/qw*(r32-r23)
             qy = 1/4/qw*(r13-r31)
             qz = 1/4/qw*(r21-r12)
-           
+
             quat = [qx, qy, qz, qw]
             quat_norm = quat / np.linalg.norm(quat)
             qx = quat_norm[0]
             qy = quat_norm[1]
             qz = quat_norm[2]
             qw = quat_norm[3]
-    
-            offset_x = width_apriltag-length_robot/2
-            offset_y = width_robot/2-width_apriltag
-            offset = np.array([offset_y, offset_x, 0])
+
+            if(angle == '-pi/2'):
+                if(center_robot == 'base_center'):
+                    offset_x = 0
+                    offset_y = 0
+                    offset_z = 0.04
+                elif(center_robot == 'arm_center'):
+                    offset_x = 0.0
+                    offset_y = 0.0
+                    offset_z = 0.04
+            if(angle == 'pi/2'):
+                if(center_robot == 'arm_center'):
+                    offset_x = 0.11
+                    offset_y = 0.0625
+                    offset_z = 0.04
+            
+            # offset = np.array([offset_x, offset_y, offset_z])
+            offset = np.array([offset_x, offset_y, offset_z])
             M2 = np.dot(M, offset)
-            center_point = upper_right_3d+np.array([M2[1], M2[2], M2[0]])
-            robot_pose_in_camera_frame = [center_point[0], center_point[1], center_point[2], qw, qx, qy, qz] #### Regarder labo ordre (qz, qx, qy, qz)
+            center_point = upper_right_3d+np.array([M2[0], M2[1], M2[2]])# M2[1], M2[2], M2[0]
+            # center_point = upper_right_3d+np.array([M2[0], M2[1], M2[2]])
+            robot_pose_in_camera_frame = [center_point[0], center_point[1], center_point[2], qx, qy, qz, qw] #### Regarder labo ordre (qz, qx, qy, qz)
+            # robot_pose_in_camera_frame = [upper_right_3d[0], upper_right_3d[1], upper_right_3d[2], qw, qx, qy, qz]
         except:
             robot_pose_in_camera_frame = 'NULL'
+
+    if(number_of_apriltag == 0):
+        robot_pose_in_camera_frame = 'NULL'
 
     return robot_pose_in_camera_frame
 
@@ -180,18 +363,26 @@ def main():
     rospy.init_node('get_pose_robot', anonymous=True)
     br = tf.TransformBroadcaster()
     rate = rospy.Rate(publish_rate)
+
+    x, y, z = 0, 0, 0
+
     while not rospy.is_shutdown():
         robot_pose_in_camera_frame = get_pose()
         t = rospy.Time.now()
 
+        # print(abs(robot_pose_in_camera_frame[0]-x), abs(robot_pose_in_camera_frame[1]-y), abs(robot_pose_in_camera_frame[2]-z))
+
+        x, y, z = robot_pose_in_camera_frame[0], robot_pose_in_camera_frame[1], robot_pose_in_camera_frame[2]
+
         br.sendTransform((robot_pose_in_camera_frame[0], robot_pose_in_camera_frame[1], robot_pose_in_camera_frame[2]),
                          (robot_pose_in_camera_frame[3], robot_pose_in_camera_frame[4], robot_pose_in_camera_frame[5], robot_pose_in_camera_frame[6]),
                          rospy.Time.now(),
-                         "robot_base", 
+                         "base_link",
                          "zed2_left_camera_frame")
 
         print("Publish")
         rate.sleep()
+    rospy.spin()
 
 
 if __name__ == '__main__':
